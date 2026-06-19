@@ -651,6 +651,26 @@ async def update_end_user(
             )
             update_end_user_table_data.pop("object_permission", None)
 
+        if data.spend is not None:
+            try:
+                from litellm.proxy.proxy_server import spend_counter_cache
+
+                _counter_key = f"spend:user:{data.user_id}"
+                if spend_counter_cache is not None:
+                    if spend_counter_cache.in_memory_cache is not None:
+                        spend_counter_cache.in_memory_cache.set_cache(
+                            key=_counter_key, value=data.spend, ttl=60
+                        )
+                    if spend_counter_cache.redis_cache is not None:
+                        try:
+                            await spend_counter_cache.redis_cache.async_set_cache(
+                                key=_counter_key, value=data.spend, ttl=60
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
         if data.user_id is not None and len(data.user_id) > 0:
             update_end_user_table_data["user_id"] = data.user_id  # type: ignore
             verbose_proxy_logger.debug("In update customer, user_id condition block.")

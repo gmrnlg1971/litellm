@@ -2603,12 +2603,22 @@ async def update_key_fn(
 
         if data.spend is not None:
             try:
-                from litellm.proxy.proxy_server import _invalidate_spend_counter
+                from litellm.proxy.proxy_server import spend_counter_cache
 
                 token_to_invalidate = _hash_token_if_needed(key)
-                await _invalidate_spend_counter(
-                    counter_key=f"spend:key:{token_to_invalidate}"
-                )
+                _counter_key = f"spend:key:{token_to_invalidate}"
+                if spend_counter_cache is not None:
+                    if spend_counter_cache.in_memory_cache is not None:
+                        spend_counter_cache.in_memory_cache.set_cache(
+                            key=_counter_key, value=data.spend, ttl=60
+                        )
+                    if spend_counter_cache.redis_cache is not None:
+                        try:
+                            await spend_counter_cache.redis_cache.async_set_cache(
+                                key=_counter_key, value=data.spend, ttl=60
+                            )
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
