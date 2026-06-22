@@ -2421,19 +2421,70 @@ async def _add_team_members_to_team(
         litellm_proxy_admin_name=litellm_proxy_admin_name,
     )
 
-    # Update team members list
-    await _update_team_members_list(
-        data=data,
-        complete_team_data=complete_team_data,
-        updated_users=updated_users,
-    )
+    # Optimistic concurrency loop for updating team members
+    from litellm.proxy.utils import get_team_object
+    from litellm.models.team import LiteLLM_TeamTable
+    
+    max_retries = 3
+    updated_team = None
+    
+    for attempt in range(max_retries):
+        if attempt > 0:
+            latest_team_row = await get_team_object(
+                team_id=data.team_id,
+                prisma_client=prisma_client,
+                user_api_key_cache=None,
+                parent_otel_span=None,
+                proxy_logging_obj=None,
+                check_cache_only=False,
+                check_db_only=True,
+            )
+            if latest_team_row is None:
+                break
+            complete_team_data = LiteLLM_TeamTable(**latest_team_row.model_dump())
 
-    # ADD MEMBER TO TEAM
-    _db_team_members = [m.model_dump() for m in complete_team_data.members_with_roles]
-    updated_team = await TeamRepository(prisma_client).table.update(
-        where={"team_id": data.team_id},
-        data={"members_with_roles": json.dumps(_db_team_members)},  # type: ignore
-    )
+        # Use a fresh copy so we don't continually append to the same object on retries
+        fresh_team_data = LiteLLM_TeamTable(**complete_team_data.model_dump())
+
+        # Update team members list
+        await _update_team_members_list(
+            data=data,
+            complete_team_data=fresh_team_data,
+            updated_users=updated_users,
+        )
+
+        # ADD MEMBER TO TEAM
+        _db_team_members = [m.model_dump() for m in fresh_team_data.members_with_roles]
+        
+        if fresh_team_data.updated_at is not None:
+            updated_count = await TeamRepository(prisma_client).table.update_many(
+                where={
+                    "team_id": data.team_id,
+                    "updated_at": fresh_team_data.updated_at
+                },
+                data={"members_with_roles": json.dumps(_db_team_members)}  # type: ignore
+            )
+            if updated_count > 0:
+                # Successfully updated without concurrent modification
+                # Fetch the latest so we return the correct updated_at timestamp
+                updated_team_row = await TeamRepository(prisma_client).table.find_unique(
+                    where={"team_id": data.team_id}
+                )
+                if updated_team_row is not None:
+                    updated_team = LiteLLM_TeamTable(**updated_team_row.model_dump())
+                break
+        else:
+            # Fallback if updated_at is None
+            updated_team_row = await TeamRepository(prisma_client).table.update(
+                where={"team_id": data.team_id},
+                data={"members_with_roles": json.dumps(_db_team_members)},  # type: ignore
+            )
+            if updated_team_row is not None:
+                updated_team = LiteLLM_TeamTable(**updated_team_row.model_dump())
+            break
+            
+    if updated_team is None:
+        raise HTTPException(status_code=409, detail="Concurrent modification detected while updating team members. Please retry.")
 
     return updated_team, updated_users, updated_team_memberships
 
